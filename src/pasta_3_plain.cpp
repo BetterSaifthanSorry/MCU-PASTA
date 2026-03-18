@@ -3,8 +3,21 @@
 #include <cstring>
 #include <stdexcept>
 
-// Platform portability for GCC/Clang on 32-bit/64-bit systems
-typedef unsigned __int128 uint128_t;
+// Fallback 64-bit modular multiplication for 32-bit MCUs without native __int128 support
+static inline uint64_t mul_mod(uint64_t a, uint64_t b, uint64_t m) {
+    uint64_t res = 0;
+    a %= m;
+    while (b) {
+        if (b & 1) {
+            res = (res + a);
+            if (res >= m) res -= m;
+        }
+        b >>= 1;
+        a = (a << 1);
+        if (a >= m) a -= m;
+    }
+    return res;
+}
 
 // Endianness handling is provided by Keccak dependencies
 #if defined(__linux__) || defined(__APPLE__)
@@ -67,12 +80,11 @@ void Pasta::init_shake(uint64_t nonce, uint64_t block_counter) {
   *((uint64_t*)(seed + 8)) = htobe64(block_counter);
 
   if (0 != Keccak_HashInitialize_SHAKE128(&shake128_))
-    // we use exceptions here, but on strict embedded we'd use error codes
-    throw std::runtime_error("failed to init shake");
+    while(1); // loop forever on critical hardware failure
   if (0 != Keccak_HashUpdate(&shake128_, seed, sizeof(seed) * 8))
-    throw std::runtime_error("SHAKE128 update failed");
+    while(1);
   if (0 != Keccak_HashFinal(&shake128_, NULL))
-    throw std::runtime_error("SHAKE128 final failed");
+    while(1);
 }
 
 //----------------------------------------------------------------
@@ -80,9 +92,8 @@ void Pasta::init_shake(uint64_t nonce, uint64_t block_counter) {
 uint64_t Pasta::generate_random_field_element(bool allow_zero) {
   uint8_t random_bytes[sizeof(uint64_t)];
   while (1) {
-    if (0 !=
-        Keccak_HashSqueeze(&shake128_, random_bytes, sizeof(random_bytes) * 8))
-      throw std::runtime_error("SHAKE128 squeeze failed");
+    if (0 != Keccak_HashSqueeze(&shake128_, random_bytes, sizeof(random_bytes) * 8))
+      while(1);
     uint64_t ele = be64toh(*((uint64_t*)random_bytes)) & max_prime_size;
     if (!allow_zero && ele == 0) continue;
     if (ele < pasta_p) return ele;
@@ -93,7 +104,7 @@ uint64_t Pasta::generate_random_field_element(bool allow_zero) {
 
 void Pasta::calculate_row(const block& prev_row, const block& first_row, block& out) {
   for (size_t j = 0; j < PASTA_T; j++) {
-    uint64_t tmp = ((uint128_t)(first_row[j]) * prev_row[PASTA_T - 1]) % pasta_p;
+    uint64_t tmp = mul_mod(first_row[j], prev_row[PASTA_T - 1], pasta_p);
     if (j) {
       tmp = (tmp + prev_row[j - 1]) % pasta_p;
     }
@@ -223,8 +234,8 @@ void Pasta::add_rc(block& state) {
 
 void Pasta::sbox_cube(block& state) {
   for (uint16_t el = 0; el < PASTA_T; el++) {
-    uint64_t square = ((uint128_t)(state[el]) * state[el]) % pasta_p;
-    state[el] = ((uint128_t)(square)*state[el]) % pasta_p;
+    uint64_t square = mul_mod(state[el], state[el], pasta_p);
+    state[el] = mul_mod(square, state[el], pasta_p);
   }
 }
 
@@ -234,7 +245,7 @@ void Pasta::sbox_feistel(block& state) {
   block new_state;
   new_state[0] = state[0];
   for (uint16_t el = 1; el < PASTA_T; el++) {
-    uint64_t square = ((uint128_t)(state[el - 1]) * state[el - 1]) % pasta_p;
+    uint64_t square = mul_mod(state[el - 1], state[el - 1], pasta_p);
     new_state[el] = (square + state[el]) % pasta_p;
   }
   state = new_state;
@@ -263,7 +274,7 @@ void Pasta::matmul(block& state) {
 
   for (uint16_t i = 0; i < PASTA_T; i++) {
     for (uint16_t j = 0; j < PASTA_T; j++) {
-      uint64_t mult = ((uint128_t)(curr_row[j]) * state[j]) % pasta_p;
+      uint64_t mult = mul_mod(curr_row[j], state[j], pasta_p);
       new_state[i] = (new_state[i] + mult) % pasta_p;
     }
     if (i != PASTA_T - 1) {
